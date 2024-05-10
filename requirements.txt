@@ -1,0 +1,12 @@
+numpy
+torch
+tqdm
+diffusers==0.8.0
+pynvml
+wandb
+torchvision
+albumentations
+transformers
+pandas
+jupyter
+notebook
