@@ -10,3 +10,5 @@ transformers
 pandas
 jupyter
 notebook
+h5py
+matplotlib
