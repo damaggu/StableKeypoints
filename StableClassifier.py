@@ -17,9 +17,12 @@ from StableKeypoints import load_ldm, image2latent, init_random_noise, run_and_f
 
 def get_cifar10_dataloaders(batch_size=1, num_workers=4, resize_to=512, testset_size=20):
     transform_train = transforms.Compose([
+        # transforms.RandomResizedCrop(32, scale=(0.08, 1.0), ratio=(0.75, 1.3333333333333333)),
         transforms.Resize((resize_to, resize_to)),  # Resize the images
         # transforms.RandomCrop(32, padding=4),
         # transforms.RandomHorizontalFlip(),
+        # transforms.RandomRotation(15),
+        # transforms.RandomAffine(0, translate=(0.1, 0.1)),
         transforms.ToTensor(),
         # transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
     ])
@@ -70,25 +73,27 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
     # ).to(device)
     # attention_aggregator.requires_grad = True
 
-    # attention_aggregator = torch.nn.Sequential(
-    #     torch.nn.Linear(1000, 256),
-    #     torch.nn.ReLU(),
-    #     torch.nn.Linear(256, 64),
-    #     torch.nn.ReLU(),
-    #     torch.nn.Linear(64, 10),
-    # ).to(device)
+    linear_layer = torch.nn.Sequential(
+        # torch.nn.Dropout(0.2),
+        torch.nn.Linear(1000, 10),
+        # torch.nn.ReLU(),
+        # torch.nn.Linear(256, 64),
+        # torch.nn.ReLU(),
+        # torch.nn.Linear(64, 10),
+    ).to(device)
 
-    linear_layer = torch.nn.Linear(num_tokens, num_classes).to(device)
+    # linear_layer = torch.nn.Linear(num_tokens, num_classes).to(device)
     linear_layer.requires_grad = True
 
     # random project from 1000 to 10
 
     # optimizer = torch.optim.Adam([context], lr=1e-3)
-    optimizer = torch.optim.Adam([context, linear_layer.weight, linear_layer.bias], lr=5e-3)
-    # optimizer = torch.optim.Adam([
-    #     {'params': context},
-    #     {'params': attention_aggregator.parameters()}
-    # ], lr=5e-3)
+    # optimizer = torch.optim.Adam([context, linear_layer.weight, linear_layer.bias], lr=5e-3)
+    optimizer = torch.optim.Adam([
+        {'params': context},
+        {'params': linear_layer.parameters()}
+    ], lr=5e-3)
+    # ], lr=1e-3)
     cross_entropy = torch.nn.CrossEntropyLoss()
 
     # all traininalbe parameters
@@ -160,7 +165,6 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
                         device=device,
                         controllers=controllers,
                     )
-
 
                     attn_map = attn_maps[0]
                     if idx == 0:
