@@ -34,7 +34,7 @@ pl.seed_everything(42)
 
 image_size = 224
 max_epochs = 100
-num_classes = 10
+num_classes = 100
 batch_size = 1
 
 
@@ -343,17 +343,24 @@ def update_momentum_tensor(tensor: torch.Tensor, tensor_ema: torch.Tensor, m: fl
 transform = DINOTransform(normalize=None, global_crop_size=image_size)
 
 try:
-    dataset = torchvision.datasets.Imagenette(
-        "datasets/imagenette",
+    dataset = torchvision.datasets.FGVCAircraft(
+        "datasets/aircraft",
+        # "datasets/imagenette",
         download=True,
         transform=transform,
     )
 except:
-    dataset = torchvision.datasets.Imagenette(
-        "datasets/imagenette",
+    dataset = torchvision.datasets.FGVCAircraft(
+        "datasets/aircraft",
+        # "datasets/imagenette",
         download=False,
         transform=transform,
     )
+
+print(len(dataset))
+plt.imshow(dataset[0][0][0].permute(1, 2, 0))
+plt.show()
+
 # train / test split
 dataset_train = torch.utils.data.Subset(dataset, range(0, len(dataset), 2))
 dataset_test = torch.utils.data.Subset(dataset, range(1, len(dataset), 2))
