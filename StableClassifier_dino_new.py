@@ -16,6 +16,9 @@ from lightly.models.utils import deactivate_requires_grad, update_momentum
 from lightly.transforms.dino_transform import DINOTransform
 from lightly.utils.scheduler import cosine_schedule
 
+from unsupervised_keypoints.optimize_token import load_ldm
+from unsupervised_keypoints.ptp_utils import init_random_noise, run_and_find_attn
+
 
 class DINO(pl.LightningModule):
     def __init__(self):
@@ -69,7 +72,92 @@ class DINO(pl.LightningModule):
         return optim
 
 
-model = DINO()
+ldm, controllers, num_gpus = load_ldm("cuda:0",
+                                      "runwayml/stable-diffusion-v1-5",
+                                      feature_upsample_res=128)
+
+
+class StableDINO(pl.LightningModule):
+    def __init__(self):
+        super().__init__()
+        layers = [0, 1, 2, 3, 4, 5]
+        noise_level = -1
+        from_where = ["down_cross", "mid_cross", "up_cross"]
+        self.layers = layers
+        self.noise_level = noise_level
+        self.from_where = from_where
+
+        num_tokens = 1000
+        backbone = init_random_noise(self.device, num_words=num_tokens)
+        input_dim = 512
+
+        self.student_backbone = backbone
+        self.student_head = DINOProjectionHead(
+            input_dim, 512, 64, 2048, freeze_last_layer=1
+        )
+        self.teacher_backbone = copy.deepcopy(backbone)
+        self.teacher_head = DINOProjectionHead(input_dim, 512, 64, 2048)
+        deactivate_requires_grad(self.teacher_backbone)
+        deactivate_requires_grad(self.teacher_head)
+
+        self.criterion = DINOLoss(output_dim=2048, warmup_teacher_temp_epochs=5)
+
+    def forward(self, x):
+        # y = self.student_backbone(x).flatten(start_dim=1)
+        attn_maps = run_and_find_attn(
+            ldm,
+            x,
+            self.student_backbone,
+            layers=self.layers,
+            noise_level=self.noise_level,
+            from_where=self.from_where,
+            upsample_res=-1,
+            device=self.device,
+            controllers=controllers,
+        )
+        y = attn_maps[0]
+
+        z = self.student_head(y)
+        return z
+
+    def forward_teacher(self, x):
+
+        attn_maps = run_and_find_attn(
+            ldm,
+            x,
+            self.teacher_backbone,
+            layers=self.layers,
+            noise_level=self.noise_level,
+            from_where=self.from_where,
+            upsample_res=-1,
+            device=self.device,
+            controllers=controllers,
+        )
+        y = attn_maps[0]
+        z = self.teacher_head(y)
+        return z
+
+    def training_step(self, batch, batch_idx):
+        momentum = cosine_schedule(self.current_epoch, 10, 0.996, 1)
+        update_momentum(self.student_backbone, self.teacher_backbone, m=momentum)
+        update_momentum(self.student_head, self.teacher_head, m=momentum)
+        views = batch[0]
+        views = [view.to(self.device) for view in views]
+        global_views = views[:2]
+        teacher_out = [self.forward_teacher(view) for view in global_views]
+        student_out = [self.forward(view) for view in views]
+        loss = self.criterion(teacher_out, student_out, epoch=self.current_epoch)
+        return loss
+
+    def on_after_backward(self):
+        self.student_head.cancel_last_layer_gradients(current_epoch=self.current_epoch)
+
+    def configure_optimizers(self):
+        optim = torch.optim.Adam(self.parameters(), lr=0.001)
+        return optim
+
+
+model = StableDINO()
 
 transform = DINOTransform()
 # we ignore object detection annotations by setting target_transform to return 0
