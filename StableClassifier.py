@@ -307,6 +307,7 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
                     total += labels.size(0)
                     correct += (predicted == labels).sum().item()
 
+            print(f"Epoch: {i}")
             # print(f"Loss: {loss.item()}")
             print(f"Accuracy: {100 * correct / total}")
             shuffled = torch.randperm(labels.size(0))
