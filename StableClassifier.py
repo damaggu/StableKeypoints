@@ -12,7 +12,8 @@ from torchvision import transforms
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
-from StableKeypoints import load_ldm, image2latent, init_random_noise, run_and_find_attn
+from StableKeypoints import load_ldm, image2latent, init_random_noise, run_and_find_attn, RandomAffineWithInverse, \
+    equivariance_loss
 
 
 def get_cifar10_dataloaders(batch_size=1, num_workers=4, resize_to=512, testset_size=20):
@@ -44,9 +45,10 @@ def get_cifar10_dataloaders(batch_size=1, num_workers=4, resize_to=512, testset_
 
 
 def optimize_embeddings(ldm, train_dataloader, val_dataloader,
-                        context=None, num_tokens=1000, device="cuda",
+                        context=None, num_tokens=100, device="cuda",
                         layers=[0, 1, 2, 3, 4, 5], noise_level=-1,
-                        from_where=["down_cross", "mid_cross", "up_cross"], num_classes=10):
+                        from_where=["down_cross", "mid_cross", "up_cross"], num_classes=10,
+                        use_equivariance_loss=False):
     if context is None:
         context = init_random_noise(device, num_words=num_tokens)
 
@@ -75,12 +77,17 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
 
     linear_layer = torch.nn.Sequential(
         # torch.nn.Dropout(0.2),
-        torch.nn.Linear(1000, 10),
+        # torch.nn.Linear(1000, 10),
+        torch.nn.Linear(num_tokens, 10),
         # torch.nn.ReLU(),
         # torch.nn.Linear(256, 64),
         # torch.nn.ReLU(),
         # torch.nn.Linear(64, 10),
     ).to(device)
+
+    augment_degrees = 15
+    augment_scale = (0.9, 1.1)
+    augment_translate = (0.1, 0.1)
 
     # linear_layer = torch.nn.Linear(num_tokens, num_classes).to(device)
     linear_layer.requires_grad = True
@@ -99,6 +106,8 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
     # all traininalbe parameters
 
     dataloader_iter = iter(train_dataloader)
+
+    equiloss = use_equivariance_loss
 
     for i in tqdm(range(10000)):
         try:
@@ -124,6 +133,27 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
                 device=device,
                 controllers=controllers,
             )
+
+            if equiloss:
+                invertible_transform = RandomAffineWithInverse(
+                    degrees=augment_degrees,
+                    scale=augment_scale,
+                    translate=augment_translate,
+                )
+
+                transformed_img = invertible_transform(images)
+                attention_maps_transformed = run_and_find_attn(
+                    ldm,
+                    transformed_img,
+                    context,
+                    layers=layers,
+                    noise_level=noise_level,
+                    from_where=from_where,
+                    upsample_res=-1,
+                    device=device,
+                    controllers=controllers,
+                )
+
             # mean on the dims 1,2
             attn_map = attn_maps[0]
 
@@ -135,14 +165,22 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
             # attn_map = attn_map.squeeze(0)
             # output = torch.nn.functional.softmax(attn_map, dim=0)
 
-            loss += cross_entropy(output, label)
+            cross_entropy_loss = cross_entropy(output, label)
+
+            if equiloss:
+                equi_loss = equivariance_loss(attn_maps[0], attention_maps_transformed[0][None].repeat(1, 1, 1, 1),
+                                              invertible_transform, 0)
+                equi_loss = equi_loss * 100000
+                loss = equi_loss * cross_entropy_loss
+            else:
+                loss = cross_entropy_loss
+
 
         loss /= len(labels)
         loss.backward()
         if (i + 1) % len(labels) == 0:
             optimizer.step()
             optimizer.zero_grad()
-            loss = 0
 
         if i % 100 == 0:
             # validation
@@ -167,13 +205,13 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
                     )
 
                     attn_map = attn_maps[0]
-                    if idx == 0:
-                        plt.imshow(images[0].permute(1, 2, 0).detach().cpu())
-                        plt.show()
-                        plt.imshow(torch.mean(attn_map, dim=0).detach().cpu())
-                        plt.show()
-                        plt.imshow(attn_map[0].detach().cpu())
-                        plt.show()
+                    # if idx == 0:
+                    #     plt.imshow(images[0].permute(1, 2, 0).detach().cpu())
+                    #     plt.show()
+                    #     plt.imshow(torch.mean(attn_map, dim=0).detach().cpu())
+                    #     plt.show()
+                    #     plt.imshow(attn_map[0].detach().cpu())
+                    #     plt.show()
                     attn_maps = torch.mean(attn_map, dim=(1, 2))
                     outputs = linear_layer(attn_maps)
 
@@ -188,12 +226,25 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
             # print(f"Loss: {loss.item()}")
             print(f"Accuracy: {100 * correct / total}")
             shuffled = torch.randperm(labels.size(0))
+            print("ce loss", cross_entropy_loss.item())
+            if equiloss:
+                print("equi_loss", equi_loss.item())
             # shuffled according to the labels
 
     return context.detach()
 
 
+def parseargs():
+    import argparse
+    parser = argparse.ArgumentParser(description='Stable Keypoints')
+    parser.add_argument('--num_tokens', type=int, default=100)
+    parser.add_argument('--use_equivariance_loss', action='store_true', default=False)
+    return parser.parse_args()
+
+
 if __name__ == '__main__':
+
+    args = parseargs()
     trainloader, testloader = get_cifar10_dataloaders()
 
     ldm, controllers, num_gpus = load_ldm("cuda:0",
@@ -201,4 +252,5 @@ if __name__ == '__main__':
                                           feature_upsample_res=128)
 
     context = optimize_embeddings(ldm, trainloader,
-                                  val_dataloader=testloader, device="cuda:0")
+                                  val_dataloader=testloader, device="cuda:0",
+                                    num_tokens=args.num_tokens, use_equivariance_loss=args.use_equivariance_loss)
