@@ -34,12 +34,20 @@ def get_cifar10_dataloaders(batch_size=1, num_workers=4, resize_to=512, testset_
         # transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
     ])
 
-    trainset = torchvision.datasets.Imagenette(root='./data', download=False, transform=transform_train, split='train')
-    trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+    try:
+        trainset = torchvision.datasets.Imagenette(root='./data', download=True, transform=transform_train, split='train')
+        trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
 
-    testset = torchvision.datasets.Imagenette(root='./data', download=False, transform=transform_test, split='val')
-    testset, _ = torch.utils.data.random_split(testset, [testset_size, len(testset) - testset_size])
-    testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+        testset = torchvision.datasets.Imagenette(root='./data', download=True, transform=transform_test, split='val')
+        testset, _ = torch.utils.data.random_split(testset, [testset_size, len(testset) - testset_size])
+        testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    except:
+        trainset = torchvision.datasets.CIFAR10(root='./data', download=False, transform=transform_train, train=True)
+        trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+
+        testset = torchvision.datasets.CIFAR10(root='./data', download=False, transform=transform_test, train=False)
+        testset, _ = torch.utils.data.random_split(testset, [testset_size, len(testset) - testset_size])
+        testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
     return trainloader, testloader
 
@@ -170,7 +178,7 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
             if equiloss:
                 equi_loss = equivariance_loss(attn_maps[0], attention_maps_transformed[0][None].repeat(1, 1, 1, 1),
                                               invertible_transform, 0)
-                equi_loss = equi_loss * 100000
+                equi_loss = equi_loss * 10000
                 loss = equi_loss * cross_entropy_loss
             else:
                 loss = cross_entropy_loss
