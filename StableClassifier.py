@@ -46,6 +46,55 @@ def get_cifar10_dataloaders(batch_size=1, num_workers=4, resize_to=512, testset_
     return trainloader, testloader
 
 
+import torch.nn.functional as F
+
+
+# def equivariance_loss(embeddings_initial, embeddings_transformed, transform, index):
+#     embeddings_initial_prime = transform.inverse(embeddings_transformed)[index]
+#     loss = F.mse_loss(embeddings_initial, embeddings_initial_prime)
+#     return loss
+
+def total_variation_loss_fn(attn_map):
+    tv_loss = torch.mean(torch.abs(attn_map[:, :-1, :] - attn_map[:, 1:, :])) + \
+              torch.mean(torch.abs(attn_map[:, :, :-1] - attn_map[:, :, 1:]))
+    return tv_loss
+
+
+def consistency_loss_fn(original_output, transformed_output):
+    loss = F.mse_loss(original_output, transformed_output)
+    return loss
+
+
+def entropy_loss_fn(output):
+    epsilon = 1e-9
+    entropy = -torch.sum(output * torch.log(output + epsilon))
+    return entropy
+
+
+def diversity_loss_fn(attn_maps):
+    # Example: Pairwise diversity loss
+    diversity = 0
+    num_maps = len(attn_maps)
+    if num_maps > 1:
+        for i in range(num_maps):
+            for j in range(i + 1, num_maps):
+                diversity += F.mse_loss(attn_maps[i], attn_maps[j])
+        diversity /= (num_maps * (num_maps - 1)) / 2
+    return diversity
+
+
+def semantic_diversity_loss_fn(attn_maps):
+    diversity = 0
+    num_maps = len(attn_maps)
+    if num_maps > 1:
+        for i in range(num_maps):
+            for j in range(i + 1, num_maps):
+                cos_sim = F.cosine_similarity(attn_maps[i].view(1, -1), attn_maps[j].view(1, -1), dim=1)
+                diversity += (1 - cos_sim)
+        diversity /= (num_maps * (num_maps - 1)) / 2
+    return diversity
+
+
 def optimize_embeddings(ldm, train_dataloader, val_dataloader,
                         context=None, num_tokens=100, device="cuda",
                         layers=[0, 1, 2, 3, 4, 5], noise_level=-1,
@@ -115,6 +164,7 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
     consistency = True if "consistency" in losses else False
     entropy_loss = True if "entropy_loss" in losses else False
     diversity_loss = True if "diversity_loss" in losses else False
+    semantic_diversity_loss = True if "semantic_diversity_loss" in losses else False
 
     for i in tqdm(range(10000)):
         try:
@@ -141,7 +191,7 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
                 controllers=controllers,
             )
 
-            if equiloss:
+            if equiloss or consistency:
                 invertible_transform = RandomAffineWithInverse(
                     degrees=augment_degrees,
                     scale=augment_scale,
@@ -173,32 +223,42 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
             # output = torch.nn.functional.softmax(attn_map, dim=0)
 
             cross_entropy_loss = cross_entropy(output, label)
+            cross_entropy_loss /= 10000
             loss += cross_entropy_loss
 
             if equiloss:
                 equi_loss = equivariance_loss(attn_maps[0], attention_maps_transformed[0][None].repeat(1, 1, 1, 1),
                                               invertible_transform, 0)
-                equi_loss = equi_loss * 10000
+                equi_loss /= 100
                 loss += equi_loss
 
             if total_variation:
-                total_variation_loss = torch.mean(torch.abs(attn_maps[0][:, :, :-1, :] - attn_maps[0][:, :, 1:, :])) + \
-                                       torch.mean(torch.abs(attn_maps[0][:, :, :, :-1] - attn_maps[0][:, :, :, 1:]))
-                loss += total_variation_loss
+                tv_loss = total_variation_loss_fn(attn_maps[0])
+                loss += tv_loss
 
             if consistency:
-                # consistency_loss = torch.mean(torch.abs(attn_maps[0] - attn_maps[1]))
-                # consistency_loss = torch.nn.functional.mse_loss(attn_maps[0], attn_maps[1])
-                # TOOD: do sth with cos similarity
-                pass
+                # original_output = attn_maps[0]
+                # transformed_output = attention_maps_transformed[0]
+                # cons_loss = consistency_loss_fn(original_output, transformed_output)
+                # loss += cons_loss
+                transformed_maps_means = torch.mean(attention_maps_transformed[0], dim=(1, 2))
+                cos_sim = F.cosine_similarity(attn_map.view(1, -1), transformed_maps_means.view(1, -1), dim=1)
+                cons_loss = 1 - cos_sim.mean()
+                loss += cons_loss
 
             if entropy_loss:
-                epsilon = 1e-9  # To avoid log(0)
+                ent_loss = entropy_loss_fn(output)
+                ent_loss /= 10000
+                loss += ent_loss
 
             if diversity_loss:
-                pass
+                div_loss = diversity_loss_fn(attn_maps[0])
+                loss += div_loss
 
-
+            if semantic_diversity_loss:
+                sem_div_loss = semantic_diversity_loss_fn(attn_maps[0])
+                sem_div_loss /= 100
+                loss += sem_div_loss[0]
 
         loss /= len(labels)
         loss.backward()
@@ -253,6 +313,16 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
             print("ce loss", cross_entropy_loss.item())
             if equiloss:
                 print("equi_loss", equi_loss.item())
+            if total_variation:
+                print("tv_loss", tv_loss.item())
+            if entropy_loss:
+                print("ent_loss", ent_loss.item())
+            if consistency:
+                print("cons_loss", cons_loss.item())
+            if diversity_loss:
+                print("div_loss", div_loss.item())
+            if semantic_diversity_loss:
+                print("sem_div_loss", sem_div_loss.item())
             # shuffled according to the labels
 
     return context.detach()
@@ -262,12 +332,13 @@ def parseargs():
     import argparse
     parser = argparse.ArgumentParser(description='Stable Keypoints')
     parser.add_argument('--num_tokens', type=int, default=100)
-    parser.add_argument('--losses', nargs='+', default=["equivariance_loss"])
+    # options are: equivariance_loss, total_variation, consistency, entropy_loss, diversity_loss
+    parser.add_argument('--losses', nargs='+',
+                        default=["total_variation", "entropy_loss", "diversity_loss", "semantic_diversity_loss"])
     return parser.parse_args()
 
 
 if __name__ == '__main__':
-
     args = parseargs()
     trainloader, testloader = get_cifar10_dataloaders()
 
@@ -277,4 +348,4 @@ if __name__ == '__main__':
 
     context = optimize_embeddings(ldm, trainloader,
                                   val_dataloader=testloader, device="cuda",
-                                    num_tokens=args.num_tokens, losses=args.losses)
+                                  num_tokens=args.num_tokens, losses=args.losses)
