@@ -249,10 +249,10 @@ if __name__ == '__main__':
     args = parseargs()
     trainloader, testloader = get_cifar10_dataloaders()
 
-    ldm, controllers, num_gpus = load_ldm("cuda:0",
+    ldm, controllers, num_gpus = load_ldm("cuda",
                                           "runwayml/stable-diffusion-v1-5",
                                           feature_upsample_res=128)
 
     context = optimize_embeddings(ldm, trainloader,
-                                  val_dataloader=testloader, device="cuda:0",
+                                  val_dataloader=testloader, device="cuda",
                                     num_tokens=args.num_tokens, use_equivariance_loss=args.use_equivariance_loss)
