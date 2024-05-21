@@ -50,7 +50,8 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
                         context=None, num_tokens=100, device="cuda",
                         layers=[0, 1, 2, 3, 4, 5], noise_level=-1,
                         from_where=["down_cross", "mid_cross", "up_cross"], num_classes=10,
-                        use_equivariance_loss=False):
+                        losses=None,
+                        ):
     if context is None:
         context = init_random_noise(device, num_words=num_tokens)
 
@@ -109,7 +110,10 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
 
     dataloader_iter = iter(train_dataloader)
 
-    equiloss = use_equivariance_loss
+    equiloss = True if "equivariance_loss" in losses else False
+    total_variation = True if "total_variation" in losses else False
+    consistency = True if "consistency" in losses else False
+    entropy_loss = True if "entropy_loss" in losses else False
 
     for i in tqdm(range(10000)):
         try:
@@ -168,14 +172,13 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
             # output = torch.nn.functional.softmax(attn_map, dim=0)
 
             cross_entropy_loss = cross_entropy(output, label)
+            loss += cross_entropy_loss
 
             if equiloss:
                 equi_loss = equivariance_loss(attn_maps[0], attention_maps_transformed[0][None].repeat(1, 1, 1, 1),
                                               invertible_transform, 0)
                 equi_loss = equi_loss * 10000
-                loss = equi_loss * cross_entropy_loss
-            else:
-                loss = cross_entropy_loss
+                loss += equi_loss
 
 
         loss /= len(labels)
