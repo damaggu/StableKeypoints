@@ -114,6 +114,7 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
     total_variation = True if "total_variation" in losses else False
     consistency = True if "consistency" in losses else False
     entropy_loss = True if "entropy_loss" in losses else False
+    diversity_loss = True if "diversity_loss" in losses else False
 
     for i in tqdm(range(10000)):
         try:
@@ -180,6 +181,24 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
                 equi_loss = equi_loss * 10000
                 loss += equi_loss
 
+            if total_variation:
+                total_variation_loss = torch.mean(torch.abs(attn_maps[0][:, :, :-1, :] - attn_maps[0][:, :, 1:, :])) + \
+                                       torch.mean(torch.abs(attn_maps[0][:, :, :, :-1] - attn_maps[0][:, :, :, 1:]))
+                loss += total_variation_loss
+
+            if consistency:
+                # consistency_loss = torch.mean(torch.abs(attn_maps[0] - attn_maps[1]))
+                # consistency_loss = torch.nn.functional.mse_loss(attn_maps[0], attn_maps[1])
+                # TOOD: do sth with cos similarity
+                pass
+
+            if entropy_loss:
+                epsilon = 1e-9  # To avoid log(0)
+
+            if diversity_loss:
+                pass
+
+
 
         loss /= len(labels)
         loss.backward()
@@ -243,7 +262,7 @@ def parseargs():
     import argparse
     parser = argparse.ArgumentParser(description='Stable Keypoints')
     parser.add_argument('--num_tokens', type=int, default=100)
-    parser.add_argument('--use_equivariance_loss', action='store_true', default=False)
+    parser.add_argument('--losses', nargs='+', default=["equivariance_loss"])
     return parser.parse_args()
 
 
@@ -258,4 +277,4 @@ if __name__ == '__main__':
 
     context = optimize_embeddings(ldm, trainloader,
                                   val_dataloader=testloader, device="cuda",
-                                    num_tokens=args.num_tokens, use_equivariance_loss=args.use_equivariance_loss)
+                                    num_tokens=args.num_tokens, losses=args.losses)
