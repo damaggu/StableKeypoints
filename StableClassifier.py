@@ -244,6 +244,7 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
                 transformed_maps_means = torch.mean(attention_maps_transformed[0], dim=(1, 2))
                 cos_sim = F.cosine_similarity(attn_map.view(1, -1), transformed_maps_means.view(1, -1), dim=1)
                 cons_loss = 1 - cos_sim.mean()
+                cons_loss /= 100
                 loss += cons_loss
 
             if entropy_loss:
