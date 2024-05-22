@@ -162,7 +162,7 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
     optimizer = torch.optim.Adam([
         {'params': context},
         {'params': linear_layer.parameters()}
-    ], lr=5e-3, weight_decay=0.0001)
+    ], lr=5e-3)
     # ], lr=1e-3)
     cross_entropy = torch.nn.CrossEntropyLoss()
 
@@ -177,6 +177,9 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
     diversity_loss = True if "diversity_loss" in losses else False
     semantic_diversity_loss = True if "semantic_diversity_loss" in losses else False
     semantic_consistency_loss = True if "semantic_consistency_loss" in losses else False
+
+    import torch.nn.utils as utils
+
 
     for i in tqdm(range(10000)):
         try:
@@ -282,6 +285,8 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
 
         loss /= len(labels)
         loss.backward()
+        utils.clip_grad_norm_(linear_layer.parameters(), max_norm=1.0)
+        utils.clip_grad_norm_(context, max_norm=1.0)
         if (i + 1) % len(labels) == 0:
             optimizer.step()
             optimizer.zero_grad()
