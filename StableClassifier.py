@@ -65,6 +65,12 @@ def consistency_loss_fn(original_output, transformed_output):
     return loss
 
 
+def semantic_consistency_loss_fn(original_output, transformed_output):
+    cos_sim = F.cosine_similarity(original_output.view(1, -1), transformed_output.view(1, -1), dim=1)
+    loss = 1 - cos_sim
+    return loss
+
+
 def entropy_loss_fn(output):
     epsilon = 1e-9
     entropy = -torch.sum(output * torch.log(output + epsilon))
@@ -165,6 +171,7 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
     entropy_loss = True if "entropy_loss" in losses else False
     diversity_loss = True if "diversity_loss" in losses else False
     semantic_diversity_loss = True if "semantic_diversity_loss" in losses else False
+    semantic_consistency_loss = True if "semantic_consistency_loss" in losses else False
 
     for i in tqdm(range(10000)):
         try:
@@ -261,6 +268,13 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
                 sem_div_loss /= 100
                 loss += sem_div_loss[0]
 
+            if semantic_consistency_loss:
+                sem_cons_loss = semantic_consistency_loss_fn(attn_maps[0], attention_maps_transformed[0])
+                sem_cons_loss /= 100
+                loss += sem_cons_loss
+
+
+
         loss /= len(labels)
         loss.backward()
         if (i + 1) % len(labels) == 0:
@@ -325,6 +339,8 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
                 print("div_loss", div_loss.item())
             if semantic_diversity_loss:
                 print("sem_div_loss", sem_div_loss.item())
+            if semantic_consistency_loss:
+                print("sem_cons_loss", sem_cons_loss.item())
             # shuffled according to the labels
 
     return context.detach()
