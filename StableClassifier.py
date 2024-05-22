@@ -285,8 +285,8 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
 
         loss /= len(labels)
         loss.backward()
-        # utils.clip_grad_norm_(linear_layer.parameters(), max_norm=1.0)
-        # utils.clip_grad_norm_(context, max_norm=1.0)
+        utils.clip_grad_norm_(linear_layer.parameters(), max_norm=1.0)
+        utils.clip_grad_norm_(context, max_norm=1.0)
         if (i + 1) % len(labels) == 0:
             optimizer.step()
             optimizer.zero_grad()
