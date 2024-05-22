@@ -143,9 +143,13 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
         # torch.nn.Linear(64, 10),
     ).to(device)
 
-    augment_degrees = 15
-    augment_scale = (0.9, 1.1)
-    augment_translate = (0.1, 0.1)
+    # augment_degrees = 15
+    # augment_scale = (0.9, 1.1)
+    # augment_translate = (0.1, 0.1)
+    augment_degrees = 35
+    augment_scale = (0.8, 1.2)
+    augment_translate = (0.2, 0.2)
+
 
     # linear_layer = torch.nn.Linear(num_tokens, num_classes).to(device)
     linear_layer.requires_grad = True
