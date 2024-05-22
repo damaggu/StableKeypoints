@@ -1,3 +1,4 @@
+import pickle
 import time
 
 import torch
@@ -161,7 +162,7 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
     optimizer = torch.optim.Adam([
         {'params': context},
         {'params': linear_layer.parameters()}
-    ], lr=5e-3)
+    ], lr=5e-3, weight_decay=0.0001)
     # ], lr=1e-3)
     cross_entropy = torch.nn.CrossEntropyLoss()
 
