@@ -68,7 +68,7 @@ def consistency_loss_fn(original_output, transformed_output):
 def semantic_consistency_loss_fn(original_output, transformed_output):
     cos_sim = F.cosine_similarity(original_output.view(1, -1), transformed_output.view(1, -1), dim=1)
     loss = 1 - cos_sim
-    return loss
+    return loss.mean()
 
 
 def entropy_loss_fn(output):
