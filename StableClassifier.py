@@ -198,7 +198,7 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
                 controllers=controllers,
             )
 
-            if equiloss or consistency:
+            if equiloss or consistency or semantic_consistency_loss:
                 invertible_transform = RandomAffineWithInverse(
                     degrees=augment_degrees,
                     scale=augment_scale,
