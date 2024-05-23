@@ -161,7 +161,8 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
     # optimizer = torch.optim.Adam([context, linear_layer.weight, linear_layer.bias], lr=5e-3)
     optimizer = torch.optim.Adam([
         {'params': context},
-        {'params': linear_layer.parameters(), 'weight_decay': 1e-4},
+        # {'params': linear_layer.parameters(), 'weight_decay': 1e-4},
+        {'params': linear_layer.parameters()},
     ], lr=5e-3)
     # ], lr=1e-3)
     cross_entropy = torch.nn.CrossEntropyLoss()
@@ -285,8 +286,8 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
 
         loss /= len(labels)
         loss.backward()
-        utils.clip_grad_norm_(linear_layer.parameters(), max_norm=1.0)
-        utils.clip_grad_norm_(context, max_norm=1.0)
+        # utils.clip_grad_norm_(linear_layer.parameters(), max_norm=1.0)
+        # utils.clip_grad_norm_(context, max_norm=1.0)
         if (i + 1) % len(labels) == 0:
             optimizer.step()
             optimizer.zero_grad()
