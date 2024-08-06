@@ -36,9 +36,9 @@ pl.seed_everything(42)
 image_size = 224
 max_epochs = 100
 num_classes = 100
-batch_size = 16
-gradient_accumulation_steps = 16
-
+batch_size = 1
+gradient_accumulation_steps = 1
+n_tokens = 200
 
 def knn_predict(
         feature: Tensor,
@@ -394,15 +394,15 @@ class StableDINO(BenchmarkModule):
         self.noise_level = noise_level
         self.from_where = from_where
 
-        # hidden_dim = 512
-        # bottleneck_dim = 64
-        # output_dim = 2048
+        hidden_dim = 512
+        bottleneck_dim = 64
+        output_dim = 2048
 
-        hidden_dim = 256
-        bottleneck_dim = 32
-        output_dim = 1024
+        # hidden_dim = 256
+        # bottleneck_dim = 32
+        # output_dim = 1024
 
-        num_tokens = 500
+        num_tokens = n_tokens
         backbone = init_random_noise(self.device, num_words=num_tokens)
         input_dim = num_tokens
 
@@ -543,8 +543,8 @@ dataloader_val = torch.utils.data.DataLoader(
     num_workers=8,
 )
 
-# model = StableDINO(dataloader_val, num_classes)
-model = DINO(dataloader_val, num_classes)
+model = StableDINO(dataloader_val, num_classes)
+# model = DINO(dataloader_val, num_classes)
 
 accelerator = "gpu" if torch.cuda.is_available() else "cpu"
 
