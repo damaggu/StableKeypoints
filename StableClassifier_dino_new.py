@@ -11,16 +11,15 @@ import lightning.pytorch as pl
 import torch
 import torchvision
 from lightly.data import LightlyDataset
-from lightly.transforms import MoCoV2Transform
 from lightning.pytorch.utilities.types import STEP_OUTPUT
 from torch import nn
+import os
 
-from lightly.loss import DINOLoss, NTXentLoss
-from lightly.models.modules import DINOProjectionHead, MoCoProjectionHead
+from lightly.loss import DINOLoss
+from lightly.models.modules import DINOProjectionHead
 from lightly.models.utils import deactivate_requires_grad, update_momentum
 from lightly.transforms.dino_transform import DINOTransform
 from lightly.utils.scheduler import cosine_schedule
-from tqdm import tqdm
 
 from unsupervised_keypoints.optimize_token import load_ldm
 from unsupervised_keypoints.ptp_utils import init_random_noise, run_and_find_attn
@@ -34,12 +33,11 @@ from torch.utils.data import DataLoader
 
 pl.seed_everything(42)
 
-image_size = 256
-max_epochs = 500
+image_size = 224
+max_epochs = 100
 num_classes = 100
-# batch_size = 8
-batch_size = 2
-debug = 0
+batch_size = 16
+gradient_accumulation_steps = 16
 
 
 def knn_predict(
@@ -209,24 +207,16 @@ class BenchmarkModule(pl.LightningModule):
         with torch.no_grad():
             for data in self.dataloader_kNN:
                 img, target, _ = data
-                # img = img.to(self.device)
-                # target = target.to(self.device)
-
-                # # TODO: changes here
+                # TODO: changes here
                 img = img[0]
                 target = target[0]
                 img = img.to(self.device)
                 target = target.to(self.device).unsqueeze(0)
-
-                # feature = self.get_attn_maps(img, self.student_backbone)
-                # features = [self.get_attn_maps(i.unsqueeze(0), self.student_backbone) for i in img]
-                # feature = torch.stack(features)
-
-                if 'Stable' in self.__class__.__name__:
-                    feature = self.forward(img)
+                if "Stable" in self.__class__.__name__:
+                    feature = self.get_attn_maps(img, self.student_backbone)
+                    feature = feature.unsqueeze(0)
                 else:
-                    feature = self.backbone(img)
-                    feature = feature[:, :, -1, -1]  # 128, 512, 1, 1-> 128, 512
+                    feature = self(img)
                 feature = F.normalize(feature, dim=1)
                 if (
                         dist.is_available()
@@ -245,25 +235,12 @@ class BenchmarkModule(pl.LightningModule):
         # we can only do kNN predictions once we have a feature bank
         if self._train_features is not None and self._train_targets is not None:
             images, targets, _ = batch
-            # feature = self.get_attn_maps(images[0], self.student_backbone)
-            # feature = feature.unsqueeze(0)
-            images = images[0]
-            images = images.to(self.device)
-            targets = targets.to(self.device)
-            # feature = self.backbone(images).squeeze()
-
-            if 'Stable' in self.__class__.__name__:
-                feature = self.forward(images)
+            if "Stable" in self.__class__.__name__:
+                feature = self.get_attn_maps(images[0], self.student_backbone)
+                feature = feature.unsqueeze(0)
             else:
-                feature = self.backbone(images)
-                feature = feature[:, :, -1, -1]  # 128, 512, 1, 1-> 128, 512
+                feature = self(images[0])
             feature = F.normalize(feature, dim=1)
-
-            # features = [self.get_attn_maps(i.unsqueeze(0), self.student_backbone) for i in images]
-            # feature = torch.stack(features)
-            # feature = F.normalize(feature, dim=1)
-
-            # feature = F.normalize(feature, dim=1)
             predicted_labels = knn_predict(
                 feature,
                 self._train_features,
@@ -306,16 +283,21 @@ class DINO(BenchmarkModule):
         # backbone = torch.hub.load('facebookresearch/dino:main', 'dino_vits16', pretrained=False)
         # input_dim = backbone.embed_dim
 
+        hidden_dim = 512
+        bottleneck_dim = 64
+        output_dim = 2048
+        freeze_last_layer = 1
+
         self.student_backbone = backbone
         self.student_head = DINOProjectionHead(
-            input_dim, 512, 64, 2048, freeze_last_layer=1
+            input_dim, hidden_dim, bottleneck_dim, output_dim, freeze_last_layer=freeze_last_layer
         )
         self.teacher_backbone = copy.deepcopy(backbone)
-        self.teacher_head = DINOProjectionHead(input_dim, 512, 64, 2048)
+        self.teacher_head = DINOProjectionHead(input_dim, hidden_dim, bottleneck_dim, output_dim)
         deactivate_requires_grad(self.teacher_backbone)
         deactivate_requires_grad(self.teacher_head)
 
-        self.criterion = DINOLoss(output_dim=2048, warmup_teacher_temp_epochs=5)
+        self.criterion = DINOLoss(output_dim=output_dim, warmup_teacher_temp_epochs=5)
 
     def forward(self, x):
         y = self.student_backbone(x).flatten(start_dim=1)
@@ -337,6 +319,9 @@ class DINO(BenchmarkModule):
         teacher_out = [self.forward_teacher(view) for view in global_views]
         student_out = [self.forward(view) for view in views]
         loss = self.criterion(teacher_out, student_out, epoch=self.current_epoch)
+        if batch_idx % 100 == 0:
+            l = loss.detach().cpu().item()
+            self.log("train_loss", l)
         return loss
 
     def on_after_backward(self):
@@ -351,7 +336,7 @@ import matplotlib.pyplot as plt
 
 ldm, controllers, num_gpus = load_ldm("cuda:0",
                                       "runwayml/stable-diffusion-v1-5",
-                                      feature_upsample_res=32)
+                                      feature_upsample_res=128)
 
 
 def update_momentum_tensor(tensor: torch.Tensor, tensor_ema: torch.Tensor, m: float):
@@ -371,36 +356,30 @@ def update_momentum_tensor(tensor: torch.Tensor, tensor_ema: torch.Tensor, m: fl
     tensor_ema.data = tensor_ema.data * m + tensor.data * (1.0 - m)
 
 
-# transform = DINOTransform(normalize=None, global_crop_size=image_size)
-transform = MoCoV2Transform(input_size=image_size, normalize=None)
+transform = DINOTransform(normalize=None, global_crop_size=image_size)
 
 try:
-    dataset = torchvision.datasets.Imagenette(
-        # "datasets/aircraft",
-        "datasets/imagenette",
+    dataset = torchvision.datasets.FGVCAircraft(
+        "datasets/aircraft",
+        # "datasets/imagenette",
         download=True,
         transform=transform,
     )
 except:
-    dataset = torchvision.datasets.Imagenette(
-        # "datasets/aircraft",
-        "datasets/imagenette",
+    dataset = torchvision.datasets.FGVCAircraft(
+        "datasets/aircraft",
+        # "datasets/imagenette",
         download=False,
         transform=transform,
     )
 
 print(len(dataset))
-# plt.imshow(dataset[0][0][0].permute(1, 2, 0))
-# plt.show()
+plt.imshow(dataset[0][0][0].permute(1, 2, 0))
+plt.show()
 
 # train / test split
 dataset_train = torch.utils.data.Subset(dataset, range(0, len(dataset), 2))
 dataset_test = torch.utils.data.Subset(dataset, range(1, len(dataset), 2))
-
-# debug
-if debug:
-    dataset_train = torch.utils.data.Subset(dataset_train, range(0, 50))
-    dataset_test = torch.utils.data.Subset(dataset_test, range(0, 50))
 
 example_frame = dataset[0][0][0]
 
@@ -495,393 +474,79 @@ class StableDINO(BenchmarkModule):
         student_out = [self.forward(view) for view in views]
         loss = self.criterion(teacher_out, student_out, epoch=self.current_epoch)
 
-        if batch_idx % 100 == 0:
+        # print("student weights:")
+        # print(self.student_head.layers[0].weight[0][0])
+        # print("student backbones:")
+        # print(self.student_backbone[0][0][0])
+
+        # if batch_idx % 100 == 0:
+        if batch_idx % 10 == 0:
+            resfolder = "results_dino"
+            if not os.path.exists(resfolder):
+                os.makedirs(resfolder)
             print(f"Epoch {self.current_epoch}, Loss {loss}")
             # show the image
             plt.imshow(example_frame.permute(1, 2, 0).detach().cpu())
             # plt.show()
-            plt.savefig(f"example_frame_{self.current_epoch}_{batch_idx}.png")
+            plt.savefig(os.path.join(resfolder, f"example_frame_{self.current_epoch}_{batch_idx}.png"))
             # show the attention map
             with torch.no_grad():
                 attn_map = self.get_attention_visualization(example_frame.unsqueeze(0), self.student_backbone)
                 plt.imshow(attn_map[0].detach().cpu())
                 # plt.show()
                 # save the maps
-                plt.savefig(f"attn_map0_{self.current_epoch}_{batch_idx}.png")
+                plt.savefig(os.path.join(resfolder, f"attn_map0_{self.current_epoch}_{batch_idx}.png"))
                 plt.imshow(attn_map[1].detach().cpu())
                 # plt.show()
                 # save the maps
-                plt.savefig(f"attn_map1_{self.current_epoch}_{batch_idx}.png")
+                plt.savefig(os.path.join(resfolder, f"attn_map1_{self.current_epoch}_{batch_idx}.png"))
         return loss
 
     def on_after_backward(self):
         self.student_head.cancel_last_layer_gradients(current_epoch=self.current_epoch)
 
     def configure_optimizers(self):
-        optim = torch.optim.Adam(self.parameters(), lr=0.001)
+        # optim = torch.optim.Adam(self.parameters(), lr=0.001)
+        optim = torch.optim.Adam([
+            {'params': self.student_backbone},
+            {'params': self.student_head.parameters()},
+        ], lr=0.001)
+
         return optim
 
 
-class MoCo(pl.LightningModule):
-    def __init__(self):
-        super().__init__()
-        resnet = torchvision.models.resnet18()
-        self.backbone = nn.Sequential(*list(resnet.children())[:-1])
-        self.projection_head = MoCoProjectionHead(512, 512, 128)
+dataloader_train = torch.utils.data.DataLoader(
+    dataset,
+    batch_size=batch_size,
+    shuffle=True,
+    drop_last=True,
+    num_workers=8,
+)
 
-        self.backbone_momentum = copy.deepcopy(self.backbone)
-        self.projection_head_momentum = copy.deepcopy(self.projection_head)
+test_transforms = torchvision.transforms.Compose(
+    [
+        torchvision.transforms.Resize(image_size),
+        torchvision.transforms.ToTensor(),
+    ]
+)
 
-        deactivate_requires_grad(self.backbone_momentum)
-        deactivate_requires_grad(self.projection_head_momentum)
+dataset_test_kNN = LightlyDataset.from_torch_dataset(dataset_test, transform=test_transforms)
+# subset the dataset to only use a fraction of the data - only length 20 random samples
+dataset_test_kNN = torch.utils.data.Subset(dataset_test_kNN,
+                                           random.sample(range(len(dataset_test_kNN)), 20))
 
-        self.criterion = NTXentLoss(memory_bank_size=(4096, 128))
+dataloader_val = torch.utils.data.DataLoader(
+    dataset_test_kNN,
+    batch_size=1,
+    shuffle=False,
+    drop_last=False,
+    num_workers=8,
+)
 
-    def forward(self, x):
-        query = self.backbone(x).flatten(start_dim=1)
-        query = self.projection_head(query)
-        return query
+# model = StableDINO(dataloader_val, num_classes)
+model = DINO(dataloader_val, num_classes)
 
-    def forward_momentum(self, x):
-        key = self.backbone_momentum(x).flatten(start_dim=1)
-        key = self.projection_head_momentum(key).detach()
-        return key
+accelerator = "gpu" if torch.cuda.is_available() else "cpu"
 
-    def training_step(self, batch, batch_idx):
-        momentum = cosine_schedule(self.current_epoch, 10, 0.996, 1)
-        update_momentum(self.backbone, self.backbone_momentum, m=momentum)
-        update_momentum(self.projection_head, self.projection_head_momentum, m=momentum)
-        x_query, x_key = batch[0]
-        query = self.forward(x_query)
-        key = self.forward_momentum(x_key)
-        loss = self.criterion(query, key)
-        return loss
-
-    def configure_optimizers(self):
-        optim = torch.optim.SGD(self.parameters(), lr=0.01)
-        return optim
-
-
-class StableMoCo(BenchmarkModule):
-    def __init__(self, dataloader_kNN, num_classes):
-        super().__init__(dataloader_kNN, num_classes)
-        layers = [0, 1, 2, 3, 4, 5]
-        noise_level = -1
-        from_where = ["down_cross", "mid_cross", "up_cross"]
-        self.layers = layers
-        self.noise_level = noise_level
-        self.from_where = from_where
-
-        hidden_dim = 256
-        bottleneck_dim = 32
-        output_dim = 1024
-
-        num_tokens = 1000
-        # make student backbone parameter
-        self.student_backbone = nn.Parameter(torch.randn(1, num_tokens, 768))
-        self.student_backbone.requires_grad = True
-        input_dim = num_tokens
-
-        # self.projection_head = MoCoProjectionHead(input_dim, input_dim, 128)
-        # self.projection_head = nn.Sequential(
-        #     nn.Linear(input_dim, 128),
-        #     # nn.ReLU(),
-        #     # nn.Linear(input_dim, 128),
-        # )
-        self.projection_head = nn.Linear(input_dim, 128)
-        self.projection_head.requires_grad = True
-
-        self.backbone_momentum = copy.deepcopy(self.student_backbone)
-        self.projection_head_momentum = copy.deepcopy(self.projection_head)
-
-        self.backbone_momentum.requires_grad = False
-        deactivate_requires_grad(self.projection_head_momentum)
-
-        for p in self.named_parameters():
-            if p[1].requires_grad:
-                print(p[0])
-
-        self.criterion = NTXentLoss(memory_bank_size=(4096, 128))
-
-    def get_attn_maps(self, x, bbone=None):
-        attn_maps = run_and_find_attn(
-            ldm,
-            x,
-            bbone,
-            layers=self.layers,
-            noise_level=self.noise_level,
-            from_where=self.from_where,
-            upsample_res=-1,
-            device=self.device,
-            controllers=controllers,
-        )
-        attn_maps = attn_maps[0]
-        return torch.mean(attn_maps, dim=(1, 2))
-
-    def get_attention_visualization(self, x, bbone=None):
-        attn_maps = run_and_find_attn(
-            ldm,
-            x,
-            bbone,
-            layers=self.layers,
-            noise_level=self.noise_level,
-            from_where=self.from_where,
-            upsample_res=-1,
-            device=self.device,
-            controllers=controllers,
-        )
-        attn_maps = attn_maps[0]
-        return attn_maps
-
-    def forward(self, x):
-        attn_maps = [self.get_attn_maps(i.unsqueeze(0), self.student_backbone) for i in x]
-        attn_maps = torch.stack(attn_maps)
-        query = self.projection_head(attn_maps)
-        return query
-
-    def forward_momentum(self, x):
-        attn_maps = [self.get_attn_maps(i.unsqueeze(0), self.backbone_momentum) for i in x]
-        attn_maps = torch.stack(attn_maps)
-        key = self.projection_head_momentum(attn_maps).detach()
-        return key
-
-    def training_step(self, batch, batch_idx):
-        momentum = cosine_schedule(self.current_epoch, max_epochs, 0.996, 1)
-        update_momentum_tensor(self.student_backbone, self.backbone_momentum, m=momentum)
-        update_momentum(self.projection_head, self.projection_head_momentum, m=momentum)
-        x_query, x_key = batch[0]
-        query = self.forward(x_query)
-        key = self.forward_momentum(x_key)
-        loss = self.criterion(query, key)
-        # loss.backward()
-        # print(self.student_backbone.grad)
-        print(self.student_backbone[0, 0, 0])
-        # print(self.projection_head[0].weight.grad)
-        print(self.projection_head[0].weight[0][1])
-
-        if batch_idx % 100 == 0:
-            print(f"Epoch {self.current_epoch}, Loss {loss}")
-            # show the image
-            plt.imshow(example_frame.permute(1, 2, 0).detach().cpu())
-            # TODO: check if normalization is correct?
-            plt.savefig(f"example_frame_{self.current_epoch}_{batch_idx}.png")
-            # show the attention map
-            with torch.no_grad():
-                attn_map = self.get_attention_visualization(example_frame.unsqueeze(0), self.student_backbone)
-                plt.imshow(attn_map[0].detach().cpu())
-                plt.savefig(f"attn_map0_{self.current_epoch}_{batch_idx}.png")
-                plt.imshow(attn_map[1].detach().cpu())
-                plt.savefig(f"attn_map1_{self.current_epoch}_{batch_idx}.png")
-        return loss
-
-    def configure_optimizers(self):
-        # optim = torch.optim.SGD(self.parameters(), lr=0.06)
-        optim = torch.optim.SGD([
-            # {'params': self.student_backbone},
-            {'params': self.parameters()},
-            # {'params': self.projection_head.parameters()}
-        ], lr=0.1)
-        # optimizer = torch.optim.Adam([
-        #     {'params': self.parameters(), 'weight_decay': 0.0001},
-        #     {'params': self.student_backbone, 'weight_decay': 0.0}
-        # ], lr=0.005)
-        # return optimizer
-        return optim
-
-
-class NormalMoCo(BenchmarkModule):
-    def __init__(self, dataloader_kNN, num_classes):
-        super().__init__(dataloader_kNN, num_classes)
-        resnet = torchvision.models.resnet18()
-        self.backbone = nn.Sequential(*list(resnet.children())[:-1])
-        self.projection_head = MoCoProjectionHead(512, 512, 128)
-
-        self.backbone_momentum = copy.deepcopy(self.backbone)
-        self.projection_head_momentum = copy.deepcopy(self.projection_head)
-
-        deactivate_requires_grad(self.backbone_momentum)
-        deactivate_requires_grad(self.projection_head_momentum)
-
-        self.criterion = NTXentLoss(memory_bank_size=(4096, 128))
-
-    def forward(self, x):
-        query = self.backbone(x).flatten(start_dim=1)
-        query = self.projection_head(query)
-        return query
-
-    def forward_momentum(self, x):
-        key = self.backbone_momentum(x).flatten(start_dim=1)
-        key = self.projection_head_momentum(key).detach()
-        return key
-
-    def training_step(self, batch, batch_idx):
-        momentum = cosine_schedule(self.current_epoch, 10, 0.996, 1)
-        update_momentum(self.backbone, self.backbone_momentum, m=momentum)
-        update_momentum(self.projection_head, self.projection_head_momentum, m=momentum)
-        x_query, x_key = batch[0]
-        query = self.forward(x_query)
-        key = self.forward_momentum(x_key)
-        loss = self.criterion(query, key)
-        return loss
-
-    def configure_optimizers(self):
-        optim = torch.optim.SGD(self.parameters(), lr=0.06)
-        return optim
-
-
-if __name__ == "__main__":
-
-    dataloader_train = torch.utils.data.DataLoader(
-        dataset_train,
-        batch_size=batch_size,
-        shuffle=True,
-        drop_last=True,
-        num_workers=8,
-    )
-
-    test_transforms = torchvision.transforms.Compose(
-        [
-            torchvision.transforms.Resize(image_size),
-            torchvision.transforms.ToTensor(),
-        ]
-    )
-
-    dataset_test_kNN = LightlyDataset.from_torch_dataset(dataset_test, transform=test_transforms)
-    # subset the dataset to only use a fraction of the data - only length 20 random samples
-    dataset_test_kNN = torch.utils.data.Subset(dataset_test_kNN,
-                                               random.sample(range(len(dataset_test_kNN)), 20))
-
-    dataloader_val = torch.utils.data.DataLoader(
-        dataset_test_kNN,
-        batch_size=1,
-        shuffle=False,
-        drop_last=False,
-        num_workers=8,
-    )
-
-    # model = StableDINO(dataloader_val, num_classes)
-    # model = StableMoCo(dataloader_val, num_classes)
-    # model = NormalMoCo(dataloader_val, num_classes)
-    # mdl = "normal_moco"
-    mdl = "awgwg"
-
-    if mdl == "normal_moco":
-        model = NormalMoCo(dataloader_val, num_classes)
-    else:
-        model = StableMoCo(dataloader_val, num_classes)
-
-    accelerator = "gpu"
-
-    # trainer = pl.Trainer(max_epochs=max_epochs, devices=1, accelerator=accelerator, detect_anomaly=True)
-    # trainer.fit(model=model, train_dataloaders=dataloader_train, val_dataloaders=dataloader_val)
-
-    if mdl == "normal_moco":
-        optimizer = torch.optim.SGD(
-            [
-                # {"params": model.student_backbone},
-                {"params": model.backbone.parameters()},
-                {"params": model.projection_head.parameters()},
-            ],
-            lr=0.06,
-        )
-    else:
-        optimizer = torch.optim.SGD(
-            [
-                {"params": model.student_backbone},
-                {"params": model.projection_head.parameters()},
-            ],
-            lr=0.06,
-        )
-    device = "cuda"
-    model.to(device)
-    model.train()
-    criterion = NTXentLoss(memory_bank_size=(4096, 128))
-
-    # print dataset len
-    print(len(dataset))
-    losses = []
-    accs = []
-
-    model.eval()
-    with torch.no_grad():
-        model.on_validation_epoch_start()
-        for val_batch_idx, val_batch in enumerate(dataloader_val):
-            model.validation_step(val_batch, val_batch_idx)
-        model.on_validation_epoch_end()
-
-    for epoch in range(max_epochs):
-        total_loss = 0
-        momentum_val = cosine_schedule(epoch, max_epochs, 0.996, 1)
-        model.train()
-        for batch_idx, batch in tqdm(enumerate(dataloader_train)):
-            if mdl == "normal_moco":
-                x_query, x_key = batch[0]
-                update_momentum(model.backbone, model.backbone_momentum, m=momentum_val)
-                update_momentum(
-                    model.projection_head, model.projection_head_momentum, m=momentum_val
-                )
-                x_query = x_query.to(device)
-                x_key = x_key.to(device)
-                query = model(x_query)
-                key = model.forward_momentum(x_key)
-                loss = criterion(query, key)
-                total_loss += loss.detach()
-                loss.backward()
-                optimizer.step()
-                optimizer.zero_grad()
-            else:
-                x_query, x_key = batch[0]
-                update_momentum_tensor(model.student_backbone, model.backbone_momentum, m=momentum_val)
-                update_momentum(
-                    model.projection_head, model.projection_head_momentum, m=momentum_val
-                )
-                x_query = x_query.to(device)
-                x_key = x_key.to(device)
-
-                # model.student_backbone.retain_grad()
-                # model.projection_head.retain_grad()
-                query = model(x_query)
-                key = model.forward_momentum(x_key)
-                loss = criterion(query, key)
-                total_loss += loss.detach()
-
-                query.retain_grad()
-                loss.backward()
-                optimizer.step()
-                optimizer.zero_grad()
-
-                print(model.student_backbone[0, 0, 0])
-                print(model.projection_head.weight[0][1])
-                if batch_idx % 100 == 0:
-                    print(f"Epoch {epoch}, Loss {loss}")
-                    # show the image
-                    plt.imshow(example_frame.permute(1, 2, 0).detach().cpu())
-                    # plt.show()
-                    plt.savefig(f"example_frame_{epoch}_{batch_idx}.png")
-                    # show the attention map
-                    with torch.no_grad():
-                        attn_map = model.get_attention_visualization(example_frame.unsqueeze(0), model.student_backbone)
-                        plt.imshow(attn_map[0].detach().cpu())
-                        # plt.show()
-                        plt.savefig(f"attn_map0_{epoch}_{batch_idx}.png")
-                        plt.imshow(attn_map[1].detach().cpu())
-                        # plt.show()
-                        plt.savefig(f"attn_map1_{epoch}_{batch_idx}.png")
-        model.eval()
-        with torch.no_grad():
-            print(model.backbone[0].weight[0][0][0][0])
-            model.on_validation_epoch_start()
-            for val_batch_idx, val_batch in enumerate(dataloader_val):
-                model.validation_step(val_batch, val_batch_idx)
-            model.on_validation_epoch_end()
-
-        avg_loss = total_loss / len(dataloader_train)
-        print(f"epoch: {epoch:>02}, loss: {avg_loss:.5f}")
-        losses.append(avg_loss)
-        accs.append(model.max_accuracy)
-
-    # save the stats
-    with open(f"stats_{mdl}.txt", "w") as f:
-        for i in range(len(losses)):
-            f.write(f"epoch: {i}, loss: {losses[i]}, acc: {accs[i]}\n")
-    print("done")
+trainer = pl.Trainer(max_epochs=max_epochs, devices=8, accelerator=accelerator, accumulate_grad_batches=gradient_accumulation_steps)
+trainer.fit(model=model, train_dataloaders=dataloader_train, val_dataloaders=dataloader_val)
