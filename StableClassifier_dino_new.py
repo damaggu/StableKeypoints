@@ -394,13 +394,13 @@ class StableDINO(BenchmarkModule):
         self.noise_level = noise_level
         self.from_where = from_where
 
-        hidden_dim = 512
-        bottleneck_dim = 64
-        output_dim = 2048
+        # hidden_dim = 512
+        # bottleneck_dim = 64
+        # output_dim = 2048
 
-        # hidden_dim = 256
-        # bottleneck_dim = 32
-        # output_dim = 1024
+        hidden_dim = 256
+        bottleneck_dim = 32
+        output_dim = 1024
 
         num_tokens = n_tokens
         backbone = init_random_noise(self.device, num_words=num_tokens)
