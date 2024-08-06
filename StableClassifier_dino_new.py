@@ -548,5 +548,5 @@ model = StableDINO(dataloader_val, num_classes)
 
 accelerator = "gpu" if torch.cuda.is_available() else "cpu"
 
-trainer = pl.Trainer(max_epochs=max_epochs, devices=8, accelerator=accelerator, accumulate_grad_batches=gradient_accumulation_steps)
+trainer = pl.Trainer(max_epochs=max_epochs, devices=1, accelerator=accelerator, accumulate_grad_batches=gradient_accumulation_steps)
 trainer.fit(model=model, train_dataloaders=dataloader_train, val_dataloaders=dataloader_val)
