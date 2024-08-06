@@ -12,3 +12,6 @@ jupyter
 notebook
 h5py
 matplotlib
+lightning
+lightly
+pydantic==1.10.15
