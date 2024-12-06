@@ -15,3 +15,13 @@ matplotlib
 lightning
 lightly
 pydantic==1.10.15
+# rogerio
+einops
+omegaconf
+pytorch-lightning==1.4.2
+torchmetrics==0.6.0
+-e git+https://github.com/CompVis/taming-transformers.git@master#egg=taming-transformers
+-e git+https://github.com/openai/CLIP.git@main#egg=clip
+kornia==0.6.0
+accelerate
+av

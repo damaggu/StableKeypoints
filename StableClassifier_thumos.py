@@ -6,6 +6,7 @@ import torchvision
 import torchvision.transforms as transforms
 import numpy as np
 import matplotlib.pyplot as plt
+from IPython.core.pylabtools import figsize
 
 from PIL import Image as PILImage
 import os
@@ -22,6 +23,10 @@ import torch.nn.functional as F
 
 from StableKeypoints import load_ldm, image2latent, init_random_noise, run_and_find_attn, RandomAffineWithInverse, \
     equivariance_loss
+
+from datasets.thumos import ThumosClassificationDataset, ThumosDataset
+
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 
 
 def get_cifar10_dataloaders(batch_size=1, num_workers=4, resize_to=512, testset_size=1000):
@@ -42,9 +47,33 @@ def get_cifar10_dataloaders(batch_size=1, num_workers=4, resize_to=512, testset_
 
     testset = torchvision.datasets.Imagenette(root='./data', download=dl, transform=transform_test, split='val')
     testset, _ = torch.utils.data.random_split(testset, [testset_size, len(testset) - testset_size])
-    testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
 
     return trainloader, testloader
+
+
+def get_thumos_dataloaders(batch_size=1, num_workers=4, resize_to=512, train_videos=None, test_videos=None):
+    # transforms_train = transforms.Compose([
+    #     transforms.ToPILImage(),
+    #     transforms.Resize((resize_to, resize_to)),  # Resize the images
+    #     transforms.ToTensor(),
+    # ])
+    #
+    # transforms_test = transforms.Compose([
+    #     transforms.ToPILImage(),
+    #     transforms.Resize((resize_to, resize_to)),  # Resize the images
+    #     transforms.ToTensor(),
+    # ])
+
+    train_set = ThumosClassificationDataset(split='validation', sampling_rate=8, n_videos=train_videos,
+                                            transforms=None)
+    test_set = ThumosClassificationDataset(split='test', sampling_rate=80, n_videos=test_videos,
+                                           transforms=None)
+
+    train_loader = torch.utils.data.DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+    test_loader = torch.utils.data.DataLoader(test_set, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+
+    return train_loader, test_loader
 
 
 def load_model_from_config(config, ckpt, verbose=False):
@@ -81,7 +110,7 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
     context.requires_grad = True
 
     linear_layer = torch.nn.Sequential(
-        torch.nn.Linear(num_tokens, 10),
+        torch.nn.Linear(num_tokens, num_classes),
     ).to(device)
 
     linear_layer.requires_grad = True
@@ -91,7 +120,10 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
         {'params': linear_layer.parameters()},
     ], lr=0.005)
 
-    cross_entropy = torch.nn.CrossEntropyLoss()
+    freqs = torch.tensor(train_dataloader.dataset.get_freqs()).float()
+    weight = torch.tensor(freqs.mean() / freqs).to(device)
+
+    cross_entropy = torch.nn.CrossEntropyLoss(weight=weight)
 
     dataloader_iter = iter(train_dataloader)
 
@@ -103,7 +135,10 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
         model = load_model_from_config(config, f"{ckpt}")
         model = model.to(device)
 
-    for i in tqdm(range(100000)):
+    train_loss_hist = []
+    test_loss_hist = []
+
+    for i in tqdm(range(1_500_000)):
         try:
             images, labels = next(dataloader_iter)
         except StopIteration:
@@ -145,7 +180,7 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
 
             attn_map = torch.mean(attn_map, dim=(1, 2))
             output = linear_layer(attn_map)
-            output = torch.nn.functional.softmax(output, dim=0)
+            # output = torch.nn.functional.softmax(output, dim=0)
 
             cross_entropy_loss = cross_entropy(output, label)
             loss += cross_entropy_loss
@@ -155,6 +190,8 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
         loss /= len(labels)
         loss.backward()
         # import torch.optim as optim
+
+        train_loss_hist.append(loss.item())
 
         import torch.nn.utils as utils
         utils.clip_grad_norm_(linear_layer.parameters(), max_norm=1.0)
@@ -172,11 +209,13 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
         if not os.path.exists("./attn_maps"):
             os.makedirs("./attn_maps")
 
-        if i % 1000 == 0:
+        if i > 0 and i % 100_000 == 0:
         # if False:
             # validation
             correct = 0
             total = 0
+            actions_confusion_matrix = torch.zeros(num_classes, num_classes)
+            test_loss = 0
 
             with torch.no_grad():
                 for idx, (images, labels) in enumerate(val_dataloader):
@@ -211,14 +250,14 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
 
                     if idx < 20:
                         fig, ax = plt.subplots(1, 2)
-                        ax[0].imshow(images[0].permute(1, 2, 0).detach().cpu())
+                        ax[0].imshow(((images[0].permute(1, 2, 0).detach().cpu()) + 1) / 2)
                         # plt.show()
                         # plt.savefig(f"./images/{i}_0.png")
                         ax[1].imshow(attn_map[0].detach().cpu())
                         # plt.show()
                         # plt.savefig(f"./attn_maps/{i}_0.png")
-                        os.makedirs(f"images_and_maps/{extraction_method}", exist_ok=True)
-                        plt.savefig(f"./images_and_maps/{extraction_method}/{i}_{idx}.png")
+                        os.makedirs(f"./exps/thumos/{extraction_method}/images_and_maps", exist_ok=True)
+                        plt.savefig(f"./exps/thumos/{extraction_method}/images_and_maps/{i}_{idx}.png")
 
                     attn_maps = torch.mean(attn_map, dim=(1, 2))
                     outputs = linear_layer(attn_maps)
@@ -228,22 +267,59 @@ def optimize_embeddings(ldm, train_dataloader, val_dataloader,
                     total += labels.size(0)
                     correct += (predicted == labels).sum().item()
 
-            print(f"Epoch: {i}")
-            # print(f"Loss: {loss.item()}")
-            print(f"Accuracy: {100 * correct / total}")
-            shuffled = torch.randperm(labels.size(0))
-            print("ce loss", cross_entropy_loss.item())
-            results_dict[i] = {
-                "loss": loss.item(),
-                "accuracy": 100 * correct / total,
-                "ce_loss": cross_entropy_loss.item(),
-            }
+                    # actions_confusion_matrix += confusion_matrix(labels, predicted,
+                    #                                              labels=list(range(num_classes)))
+                    actions_confusion_matrix[labels.item(), predicted.item()] += 1
 
-        # save results as txt
-        with open("results.txt", "wb") as f:
-            pickle.dump(results_dict, f)
+                    test_loss += cross_entropy(outputs, labels.squeeze()).item()
+
+            fig, ax = plt.subplots(1, 1, figsize=(12, 12))
+            disp = ConfusionMatrixDisplay(confusion_matrix=actions_confusion_matrix.numpy(),
+                                          display_labels=ThumosDataset.categories + ["No action"])
+            disp.plot(ax=ax, xticks_rotation='vertical')
+            os.makedirs(f"./exps/thumos/{extraction_method}/confusion_matrix/disp", exist_ok=True)
+            os.makedirs(f"./exps/thumos/{extraction_method}/confusion_matrix/npy", exist_ok=True)
+            plt.savefig(f"./exps/thumos/{extraction_method}/confusion_matrix/disp/{i}.png")
+            with open(f"./exps/thumos/{extraction_method}/confusion_matrix/npy/{i}.npy", "wb") as f:
+                np.save(f, actions_confusion_matrix.numpy())
+
+            acc = 100 * correct / total
+            window_size = len(val_dataloader)
+            train_loss = sum(train_loss_hist[-window_size:]) / window_size
+            test_loss /= len(val_dataloader)
+            test_loss_hist.append(test_loss)
+
+            log_lines = (f"Step: {i} | Accuracy: {acc:.4}% "
+                        f"| train loss: {train_loss:.4} | test loss: {test_loss:.4}\n")
+            for idx, cls_name in enumerate(ThumosDataset.categories + ["No action"]):
+                log_lines += (f" | {cls_name}: "
+                              f"precision: {actions_confusion_matrix[idx, idx] / actions_confusion_matrix[:, idx].sum():.4} "
+                              f"| recall: {actions_confusion_matrix[idx, idx] / actions_confusion_matrix[idx].sum():.4}\n")
+            print(log_lines)
+            os.makedirs(f"./exps/thumos/{extraction_method}", exist_ok=True)
+            with open(f"./exps/thumos/{extraction_method}/log.txt", "a") as f:
+                f.write(log_lines + "\n")
+
+            os.makedirs(f"./exps/thumos/{extraction_method}/checkpoints", exist_ok=True)
+            with open(f"./exps/thumos/{extraction_method}/checkpoints/context_{i}.pt", "wb") as f:
+                torch.save(context, f)
+
+            plot_loss(train_loss_hist, test_loss_hist, extraction_method)
+
+        # # save results as txt
+        # os.makedirs(f"results/thumos/{extraction_method}", exist_ok=True)
+        # with open(f"results/thumos/{extraction_method}/results.txt", "wb") as f:
+        #     pickle.dump(results_dict, f)
 
     return context.detach()
+
+
+def plot_loss(train_loss_hist, test_loss_hist, extraction_method):
+    fig, ax = plt.subplots(1, 1, figsize=(12, 12))
+    ax.plot(train_loss_hist, label="Train Loss")
+    ax.plot(test_loss_hist, label="Test Loss")
+    ax.legend()
+    plt.savefig(f"./exps/thumos/{extraction_method}/loss.png")
 
 
 def get_diff_latents(model, init_image, layers=[2, 5, 8, 12], t=1, resize=None,
@@ -392,8 +468,8 @@ def plot_gradients(context, extraction_method, step):
     plt.xlabel('Absolute Gradient Value')
     plt.ylabel('Frequency')
 
-    os.makedirs(f"gradients/{extraction_method}", exist_ok=True)
-    plt.savefig(f"gradients/{extraction_method}/{step}.png", dpi=300)
+    os.makedirs(f"./exps/thumos/{extraction_method}/gradients", exist_ok=True)
+    plt.savefig(f"./exps/thumos/{extraction_method}/gradients/{step}.png", dpi=300)
 
     # plt.show()
 
@@ -401,7 +477,7 @@ def plot_gradients(context, extraction_method, step):
 def parseargs():
     import argparse
     parser = argparse.ArgumentParser(description='Stable Keypoints')
-    parser.add_argument('--num_tokens', type=int, default=500)
+    parser.add_argument('--num_tokens', type=int, default=100)
     # options are: equivariance_loss, total_variation, consistency, entropy_loss, diversity_loss
     parser.add_argument('--losses', nargs='+',
                         default=[""])
@@ -415,7 +491,7 @@ def parseargs():
 
 if __name__ == '__main__':
     args = parseargs()
-    trainloader, testloader = get_cifar10_dataloaders()
+    trainloader, testloader = get_thumos_dataloaders(train_videos=1, test_videos=1)
 
     if args.extraction_method == "hooks":
         ldm, controllers, num_gpus = load_ldm("cuda",
@@ -430,4 +506,4 @@ if __name__ == '__main__':
                                   val_dataloader=testloader, device="cuda",
                                   num_tokens=args.num_tokens, losses=args.losses,
                                   extraction_method=args.extraction_method,
-                                  ckpt=args.ckpt)
+                                  ckpt=args.ckpt, num_classes=len(ThumosDataset.categories)+1)
